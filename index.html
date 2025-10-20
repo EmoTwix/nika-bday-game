@@ -28,7 +28,11 @@
     #final p { margin: 0; font-size: clamp(15px, 3.6vw, 19px); }
     #hint { position: fixed; bottom: 120px; left: 50%; transform: translateX(-50%); background: #ffffffec; border: 1px solid #fff7; box-shadow: var(--shadow); padding: 7px 12px; border-radius: 12px; font-size: 15px; opacity: 0; animation: fadeIn 1.2s ease 1.2s forwards; }
     @keyframes fadeIn { to { opacity: 1; } }
-  </style>
+    @media (orientation:portrait){
+    .padbtn{ width: 96px; height: 96px; font-size: 36px; line-height: 96px; }
+    .cluster{ bottom: max(26px, env(safe-area-inset-bottom)); }
+  }
+</style>
 </head>
 <body>
   <canvas id="game"></canvas>
@@ -71,7 +75,8 @@
       keys: { left:false, right:false, jumpHeld:false, prevJumpHeld:false },
       particles: [],
       standOn: null,
-      respawn: { x:60, y:0 }
+      respawn: { x:60, y:0 },
+      viewScale: 1
     };
 
     // ——— Игрок и физика (прыжок немного меньше, но проходной)
@@ -162,7 +167,7 @@
     window.addEventListener('keydown', unlockBGM, {once:true});
 
     // ——— Размер/чёткость под iPhone
-    function resize(){ state.width=window.innerWidth; state.height=window.innerHeight; canvas.width=Math.floor(state.width*dpr); canvas.height=Math.floor(state.height*dpr); canvas.style.width=state.width+"px"; canvas.style.height=state.height+"px"; ctx.setTransform(dpr,0,0,dpr,0,0); }
+    function resize(){ state.width=window.innerWidth; state.height=window.innerHeight; canvas.width=Math.floor(state.width*dpr); canvas.height=Math.floor(state.height*dpr); canvas.style.width=state.width+"px"; canvas.style.height=state.height+"px"; ctx.setTransform(dpr,0,0,dpr,0,0); var baseH=720; state.viewScale=Math.max(0.9, Math.min(1.6, state.height/baseH)); }
     window.addEventListener('resize', resize, {passive:true}); resize();
 
     // ——— Управление (ES5 без стрелок)
@@ -250,7 +255,7 @@
       if(player.y>level.height+60) respawn();
 
       // камера
-      var viewW=state.width; var camTarget=player.x - viewW/2 + player.w/2; state.camLook += (player.vx*30 - state.camLook)*0.08; camTarget += state.camLook; camTarget=Math.max(0,Math.min(level.width-viewW,camTarget)); state.camX += (camTarget-state.camX)*0.12;
+      var viewW=state.width / state.viewScale; var camTarget=player.x - viewW/2 + player.w/2; state.camLook += (player.vx*30 - state.camLook)*0.08; camTarget += state.camLook; camTarget=Math.max(0,Math.min(level.width-viewW,camTarget)); state.camX += (camTarget-state.camX)*0.12;
 
       // подарки
       for(var gi=0; gi<level.gifts.length; gi++){ var gg=level.gifts[gi]; if(!gg.got){ var cx=gg.x, cy=gg.y; var ghit=(player.x+player.w>cx-14 && player.x<cx+14 && player.y+player.h>cy-14 && player.y<cy+14); if(ghit){ gg.got=true; pulseHUD(); spawnSpark(cx,cy); } } }
@@ -274,14 +279,14 @@
 
     // ——— Рендер
     function draw(){
-      ctx.imageSmoothingEnabled=true; ctx.clearRect(0,0,state.width,state.height);
+      ctx.imageSmoothingEnabled=true; ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,state.width,state.height);
       var sky=ctx.createLinearGradient(0,0,0,state.height); sky.addColorStop(0,'#ffd0ec'); sky.addColorStop(1,'#cfeaff'); ctx.fillStyle=sky; ctx.fillRect(0,0,state.width,state.height);
       var t=((window.performance&&performance.now)?performance.now():Date.now())/1000 - state.t0/1000;
 
       // облака
       for(var ci=0; ci<level.clouds.length; ci++){ var c=level.clouds[ci]; var px=(c.x+Math.sin(t*c.s)*40)%(state.width+800)-200; ctx.globalAlpha=.22; ctx.beginPath(); ctx.arc(px,c.y,c.r,0,Math.PI*2); ctx.arc(px+c.r*.8,c.y+10,c.r*.7,0,Math.PI*2); ctx.arc(px-c.r*.8,c.y+18,c.r*.6,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill(); ctx.globalAlpha=1; }
 
-      ctx.save(); ctx.translate(Math.round(-state.camX),0);
+      ctx.setTransform(dpr*state.viewScale,0,0,dpr*state.viewScale,0,0); ctx.save(); ctx.translate(Math.round(-state.camX),0);
 
       // гирлянды
       for(var gi2=0; gi2<level.garlands.length; gi2++){ var g=level.garlands[gi2]; ctx.strokeStyle='#ffd6e7'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(g.x-70,g.y); ctx.quadraticCurveTo(g.x,g.y+20,g.x+70,g.y); ctx.stroke(); for(var b=-2;b<=2;b++){ ctx.fillStyle=['#ff8fc7','#87d3ff','#ffcf99','#9ff3db','#cdb7ff'][(b+2)%5]; roundRect(ctx,g.x+b*28-8,g.y+4,16,10,4); ctx.fill(); } }
@@ -313,6 +318,8 @@
       drawParticles();
 
       ctx.restore();
+      // вернёмся в экранные координаты
+      ctx.setTransform(dpr,0,0,dpr,0,0);
 
       if(state.ended){ drawFireworks(); drawConfetti(); }
     }
