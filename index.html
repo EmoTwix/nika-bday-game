@@ -1,0 +1,389 @@
+<!-- Для игры можно создать ссылку: загрузите этот HTML на любой хостинг (например, GitHub Pages или Netlify) и поделитесь URL -->
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>С Днём Рождения, Ника! — мини‑игра</title>
+  <style>
+    /* Стили оставляем — они безопасны для document.write; критичное исправление — весь JS ниже на ES5 */
+    :root {
+      --bg1: #ffd7ec; --bg2: #d9f2ff; --txt: #2d2d2d;
+      --btn: #ffffffd9; --btn-border: #ffffff88; --shadow: 0 10px 28px rgba(0,0,0,.14);
+      --accent: #ff74b9; --danger: #ff4d6d;
+    }
+    html, body { height: 100%; margin: 0; }
+    body { background: linear-gradient(180deg, var(--bg1), var(--bg2)); overflow: hidden; font-family: ui-rounded, system-ui, -apple-system, Inter, Roboto, Arial, sans-serif; color: var(--txt); touch-action: none; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #controls { position: fixed; inset: 0; pointer-events: none; }
+    .cluster { position: absolute; bottom: 22px; display: flex; gap: 14px; pointer-events: none; }
+    .left { left: max(22px, env(safe-area-inset-left)); } .right { right: max(22px, env(safe-area-inset-right)); }
+    .cluster { bottom: max(22px, env(safe-area-inset-bottom)); }
+    .padbtn { pointer-events: auto; width: 86px; height: 86px; border-radius: 26px; border: 1px solid var(--btn-border); background: var(--btn); box-shadow: var(--shadow); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); font-size: 32px; line-height: 86px; text-align: center; color: #444; user-select: none; }
+    .padbtn:active { transform: scale(.95); }
+    #hud { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); background: #ffffffe0; border: 1px solid #fff8; box-shadow: var(--shadow); padding: 8px 14px; border-radius: 16px; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); font-weight: 700; }
+    #final { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; opacity: 0; transition: opacity .8s ease; text-align: center; padding: 20px; }
+    #final .card { background: #ffffffee; border-radius: 30px; border: 1px solid #fff7; box-shadow: var(--shadow); padding: 28px 34px; max-width: min(760px, 92vw); }
+    #final h1 { margin: 0 0 10px; font-size: clamp(30px, 6.6vw, 48px); }
+    #final p { margin: 0; font-size: clamp(15px, 3.6vw, 19px); }
+    #hint { position: fixed; bottom: 120px; left: 50%; transform: translateX(-50%); background: #ffffffec; border: 1px solid #fff7; box-shadow: var(--shadow); padding: 7px 12px; border-radius: 12px; font-size: 15px; opacity: 0; animation: fadeIn 1.2s ease 1.2s forwards; }
+    @keyframes fadeIn { to { opacity: 1; } }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <!-- Фоновая музыка: положите chika.mp3 рядом с HTML или укажите свою ссылку -->
+  <audio id="bgm" src="chika.mp3" preload="auto" loop style="display:none"></audio>
+  <div id="hud">🎁 <span id="giftCount">0</span>/<span id="giftTotal">0</span></div>
+  <div id="hint">Собирай подарочки и добегай до тортика! ⟶</div>
+  <div id="controls">
+    <div class="cluster left">
+      <div class="padbtn" id="btnLeft" aria-label="Влево">◀</div>
+      <div class="padbtn" id="btnRight" aria-label="Вправо">▶</div>
+    </div>
+    <div class="cluster right">
+      <div class="padbtn" id="btnJump" aria-label="Прыжок">⤴︎</div>
+    </div>
+  </div>
+  <div id="final" aria-live="polite">
+    <div class="card">
+      <h1>С ДНЁМ РОЖДЕНИЯ, НИКА!</h1>
+      <p id="finalMsg">Ты собрала все подарочки — пусть исполняются самые тёплые мечты ✨</p>
+    </div>
+  </div>
+
+  <!-- Критично: указываем тип, ES5-синтаксис, без стрелок/спредов/темплейтов -->
+  <script type="text/javascript">
+  (function(){
+    'use strict';
+
+    // ——— Базовые ссылки и ретина
+    var canvas = document.getElementById('game');
+    var ctx = canvas.getContext('2d');
+    var dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+
+    // ——— Состояние
+    var state = {
+      width: 0, height: 0,
+      camX: 0, camLook: 0,
+      ended: false,
+      t0: (window.performance && performance.now) ? performance.now() : Date.now(),
+      keys: { left:false, right:false, jumpHeld:false, prevJumpHeld:false },
+      particles: [],
+      standOn: null,
+      respawn: { x:60, y:0 }
+    };
+
+    // ——— Игрок и физика (прыжок немного меньше, но проходной)
+    var player = { x:60, y:0, w:32, h:38, vx:0, vy:0, onGround:false, prevOnGround:false, coyote:0, jumpBuf:0, jumpTime:0 };
+    var physics = { gravity:0.70, speed:2.7, maxVx:3.9, jump:-12.8 };
+    var apexHangBoost = 0.26;  // плавное «зависание» у апекса
+    var varJumpHoldBoost = 0.38; // удержание прыжка
+    var releaseCutoff = -5.0;    // обрезание прыжка при отпускании
+
+    // ——— Настройка финала: завершать по касанию торта без обязательных подарков
+    var FINISH_ON_TOUCH = true;
+
+    // ——— Уровень
+    var level = { width:4200, height:1080, platforms:[], movers:[], springs:[], spikes:[], gifts:[], checkpoints:[], clouds:[], garlands:[], goalX:3680, goalRect:null };
+
+    function roundRect(ctx,x,y,w,h,r){ var rr=Math.min(r,Math.min(w,h)/2); ctx.beginPath(); ctx.moveTo(x+rr,y); ctx.arcTo(x+w,y,x+w,y+h,rr); ctx.arcTo(x+w,y+h,x,y+h,rr); ctx.arcTo(x,y+h,x,y,rr); ctx.arcTo(x,y,x+w,y,rr); ctx.closePath(); }
+
+    // ——— ДЕКОРАЦИИ
+    function makeDeco(){
+      var i; for(i=0;i<24;i++) level.clouds.push({x: i*200 + Math.random()*120, y: 60+Math.random()*220, r: 40+Math.random()*60, s: 0.3+Math.random()*0.6});
+      for(i=0;i<12;i++){ var gx = 200 + i*300 + (Math.random()*80-40); level.garlands.push({x: gx, y: 260 + (i%2?20:0)}); }
+    }
+
+    // ——— Генерация уровня (без лестниц и вертикальных муверов; с чекпоинтами)
+    function makeLevel(){
+      var g = level.height - 180; // базовая земля
+      level.platforms.push({x:0,y:g,w:level.width,h:260,color:'#b9ffbf'});
+
+      // стартовые островки
+      level.platforms.push({x:240,y:g-90,w:220,h:26,color:'#9ad2ff'});
+      level.platforms.push({x:540,y:g-150,w:160,h:24,color:'#ffb6da'});
+
+      // маленькая пропасть
+      level.platforms.push({x:820,y:g-80,w:90,h:18,color:'#ffc98b'});
+      addSpikeRow(980,9,26,g+100);
+
+      level.platforms.push({x:920,y:g-40,w:150,h:18,color:'#ffc98b'});
+      level.springs.push({x:1140,y:g-6,w:26,h:12,boost:-17.0});
+
+      // средняя секция
+      level.platforms.push({x:1380,y:g-120,w:180,h:22,color:'#c9b6ff'});
+      level.platforms.push({x:1500,y:g-240,w:170,h:22,color:'#9ff3db'});
+
+      // движущиеся платформы (ТОЛЬКО горизонтальные)
+      level.movers.push({x:1680,y:g-210,w:140,h:18, baseX:1680, amp:120, speed:1.0, dir:'h', color:'#b3e5ff', vx:0, vy:0});
+      level.movers.push({x:3040,y:g-160,w:140,h:18, baseX:3040, amp:110, speed:1.05, dir:'h', color:'#9ff3db', vx:0, vy:0});
+
+      // чекпоинты
+      level.checkpoints.push({x:1800,y:g-270,r:16,active:false});
+      level.checkpoints.push({x:3000,y:g-190,r:16,active:false});
+
+      // ещё пропасть + цепочка
+      addSpikeRow(2140,7,28,g+100);
+      level.platforms.push({x:2120,y:g-130,w:160,h:22,color:'#ffe08b'});
+      level.springs.push({x:2290,y:g-6,w:26,h:12,boost:-17.5});
+      level.platforms.push({x:2360,y:g-200,w:160,h:22,color:'#c9b6ff'});
+      level.platforms.push({x:2560,y:g-250,w:160,h:22,color:'#9ad2ff'});
+
+      // финалка
+      level.platforms.push({x:2780,y:g-120,w:220,h:22,color:'#ffb6da'});
+      level.platforms.push({x:3200,y:g-220,w:200,h:22,color:'#9ad2ff'});
+
+      // финиш: торт + зона касания
+      level.goalRect = {x: level.goalX-40, y: g-200-60, w: 80, h: 120};
+
+      // подарки
+      var gifts=[[260,g-120],[560,g-190],[920,g-60],[1420,g-150],[1560,g-180],[1780,g-270],[2140,g-160],[2360,g-230],[2580,g-280],[2860,g-150],[3060,g-180],[3280,g-210],[3480,g-250]];
+      level.gifts = gifts.map(function(p){ return {x:p[0], y:p[1], r:16, got:false}; });
+
+      document.getElementById('giftTotal').textContent = String(level.gifts.length);
+      makeDeco();
+      // конец генерации уровня (патч маркер)
+    }
+    function addSpikeRow(x0,count,step,y){ for(var i=0;i<count;i++) level.spikes.push({x:x0+i*step,y:y,size:18}); }
+    makeLevel();
+
+    // ——— Аудио: разблокировка по первому жесту (iOS требование)
+    var bgm = document.getElementById('bgm');
+    try{ bgm.volume = 0.5; }catch(e){}
+    function unlockBGM(){
+      if(!bgm) return;
+      var p = bgm.play && bgm.play();
+      if(p && p.catch) p.catch(function(){ /* игнорируем блокировку */ });
+      window.removeEventListener('touchstart', unlockBGM, {capture:false});
+      window.removeEventListener('keydown', unlockBGM, {capture:false});
+    }
+    window.addEventListener('touchstart', unlockBGM, {once:true});
+    window.addEventListener('keydown', unlockBGM, {once:true});
+
+    // ——— Размер/чёткость под iPhone
+    function resize(){ state.width=window.innerWidth; state.height=window.innerHeight; canvas.width=Math.floor(state.width*dpr); canvas.height=Math.floor(state.height*dpr); canvas.style.width=state.width+"px"; canvas.style.height=state.height+"px"; ctx.setTransform(dpr,0,0,dpr,0,0); }
+    window.addEventListener('resize', resize, {passive:true}); resize();
+
+    // ——— Управление (ES5 без стрелок)
+    function prevent(e){ if(e && e.preventDefault) e.preventDefault(); }
+    window.addEventListener('keydown', function(e){ if(['ArrowLeft','KeyA'].indexOf(e.code)>=0) state.keys.left=true; if(['ArrowRight','KeyD'].indexOf(e.code)>=0) state.keys.right=true; if(['ArrowUp','Space','KeyW'].indexOf(e.code)>=0){ bufferJump(); state.keys.jumpHeld=true; } });
+    window.addEventListener('keyup', function(e){ if(['ArrowLeft','KeyA'].indexOf(e.code)>=0) state.keys.left=false; if(['ArrowRight','KeyD'].indexOf(e.code)>=0) state.keys.right=false; if(['ArrowUp','Space','KeyW'].indexOf(e.code)>=0) state.keys.jumpHeld=false; });
+    function bindHold(el,on,off){ el.addEventListener('touchstart',function(e){prevent(e);on();},{passive:false}); el.addEventListener('touchend',function(e){prevent(e);off();},{passive:false}); el.addEventListener('touchcancel',function(e){prevent(e);off();},{passive:false}); el.addEventListener('mousedown',on); window.addEventListener('mouseup',off); }
+    bindHold(document.getElementById('btnLeft'), function(){state.keys.left=true;}, function(){state.keys.left=false;});
+    bindHold(document.getElementById('btnRight'), function(){state.keys.right=true;}, function(){state.keys.right=false;});
+    var btnJump=document.getElementById('btnJump');
+    btnJump.addEventListener('touchstart', function(e){prevent(e); bufferJump(); state.keys.jumpHeld=true;}, {passive:false});
+    btnJump.addEventListener('mousedown', function(){ bufferJump(); state.keys.jumpHeld=true; });
+    btnJump.addEventListener('touchend', function(){ state.keys.jumpHeld=false; }, {passive:true});
+    window.addEventListener('mouseup', function(){ state.keys.jumpHeld=false; });
+
+    // ——— Физика/коллизии
+    function bufferJump(){ player.jumpBuf = 8; }
+    function doJump(){ player.vy = physics.jump; player.onGround=false; player.coyote=0; player.jumpBuf=0; player.jumpTime=1; spawnDust(player.x+player.w/2, player.y+player.h, 6, '#8ecae6'); }
+    function rectsIntersect(ax,ay,aw,ah,b){ return ax < b.x+b.w && ax+aw > b.x && ay < b.y+b.h && ay+ah > b.y; }
+
+    function canLandTop(prevBottom, vy, ny, p, pl){
+      var overlapX = (pl.x + pl.w) > p.x && pl.x < (p.x + p.w);
+      return vy >= 0 && overlapX && prevBottom <= p.y && (ny + pl.h) >= p.y;
+    }
+
+    function update(){
+      if(state.ended){ updateFireworks(); updateConfetti(); updateParticles(); return; }
+
+      // управление горизонталью
+      var input=(state.keys.right?1:0)-(state.keys.left?1:0);
+      var accel=0.35; player.vx += (input*physics.speed - player.vx)*accel;
+      player.vx = Math.abs(player.vx)<0.01?0:Math.max(-physics.maxVx,Math.min(physics.maxVx,player.vx));
+
+      // гравитация и прыжок
+      player.vy += physics.gravity;
+      if(player.vy>-0.5 && player.vy<0.6) player.vy -= apexHangBoost;         // мягкий апекс
+      if(player.jumpTime>0 && player.jumpTime<15 && state.keys.jumpHeld) player.vy -= varJumpHoldBoost; // переменный прыжок
+      if(state.keys.prevJumpHeld && !state.keys.jumpHeld && player.vy < releaseCutoff) player.vy = releaseCutoff; // обрезание
+      if(player.vy>16) player.vy=16;
+
+      if(player.onGround){ player.coyote=8; player.jumpTime=0; } else { if(player.coyote>0) player.coyote--; if(player.jumpTime>0) player.jumpTime++; }
+      if(player.jumpBuf>0) player.jumpBuf--; if((player.coyote>0 || player.onGround) && player.jumpBuf>0) doJump();
+
+      var nx=player.x+player.vx, ny=player.y+player.vy; player.prevOnGround=player.onGround; player.onGround=false; state.standOn=null;
+
+      // обновление движущихся платформ и их скорости
+      for(var mi=0; mi<level.movers.length; mi++){ var m=level.movers[mi]; var px=m.x; var now=(window.performance&&performance.now)?performance.now():Date.now(); m.x=m.baseX+Math.sin(now/1000*m.speed)*m.amp; m.vx=m.x-px; m.vy=0; }
+
+      // общий список платформ
+      var allPlats = level.platforms.concat(level.movers.map(function(mm){ return {x:mm.x,y:mm.y,w:mm.w,h:mm.h,_m:mm}; }));
+
+      // по X
+      var rectX={x:nx,y:player.y,w:player.w,h:player.h};
+      for(var i=0;i<allPlats.length;i++){ var p=allPlats[i]; if(rectsIntersect(rectX.x,rectX.y,rectX.w,rectX.h,p)){ if(player.vx>0) nx=p.x-player.w; else if(player.vx<0) nx=p.x+p.w; player.vx=0; } }
+
+      // по Y — посадка сверху; перенос по скорости платформы
+      var prevBottom=player.y+player.h;
+      for(var k=0;k<allPlats.length;k++){
+        var q=allPlats[k];
+        if( canLandTop(prevBottom, player.vy, ny, q, player) ){
+          ny = q.y - player.h; player.vy=0; player.onGround=true; if(q._m){ state.standOn=q._m; }
+        } else if(player.vy<0 && !q._m){
+          var overlapX=(player.x+player.w)>q.x && player.x<(q.x+q.w);
+          var headHit = overlapX && ny <= q.y+q.h && player.y >= q.y+q.h;
+          if(headHit){ ny = q.y + q.h; player.vy=0; }
+        }
+      }
+
+      if(state.standOn) nx += state.standOn.vx; // перенос без дёрганий
+
+      player.x=nx; player.y=ny;
+
+      // чекпоинты
+      for(var ci=0; ci<level.checkpoints.length; ci++){
+        var cp=level.checkpoints[ci];
+        var hit = rectsIntersect(player.x,player.y,player.w,player.h,{x:cp.x-cp.r,y:cp.y-cp.r,w:cp.r*2,h:cp.r*2});
+        if(hit && !cp.active){
+          level.checkpoints.forEach(function(c){c.active=false;});
+          cp.active=true; state.respawn={x:cp.x-10,y:cp.y-cp.r- player.h};
+        }
+      }
+
+      // падения и шипы
+      for(var si=0; si<level.spikes.length; si++){ var sp=level.spikes[si]; var tri={x:sp.x,y:sp.y-18,w:24,h:18}; if(rectsIntersect(player.x,player.y,player.w,player.h,tri)) respawn(); }
+      if(player.y>level.height+60) respawn();
+
+      // камера
+      var viewW=state.width; var camTarget=player.x - viewW/2 + player.w/2; state.camLook += (player.vx*30 - state.camLook)*0.08; camTarget += state.camLook; camTarget=Math.max(0,Math.min(level.width-viewW,camTarget)); state.camX += (camTarget-state.camX)*0.12;
+
+      // подарки
+      for(var gi=0; gi<level.gifts.length; gi++){ var gg=level.gifts[gi]; if(!gg.got){ var cx=gg.x, cy=gg.y; var ghit=(player.x+player.w>cx-14 && player.x<cx+14 && player.y+player.h>cy-14 && player.y<cy+14); if(ghit){ gg.got=true; pulseHUD(); spawnSpark(cx,cy); } } }
+
+      // завершение — ТОЛЬКО если собраны все подарки И есть касание торта
+      var allGot = level.gifts.every(function(g){ return g.got; });
+      var cakeTouch = rectsIntersect(player.x,player.y,player.w,player.h, level.goalRect);
+      if(cakeTouch && (allGot || FINISH_ON_TOUCH)) endLevel(allGot);
+
+      updateParticles();
+
+      state.keys.prevJumpHeld = state.keys.jumpHeld;
+    }
+
+    function respawn(){ player.x=state.respawn.x; player.y=state.respawn.y; player.vx=player.vy=0; player.onGround=false; state.standOn=null; }
+
+    // ——— HUD
+    var giftCountEl=document.getElementById('giftCount');
+    function pulseHUD(){ var got=level.gifts.filter(function(g){return g.got;}).length; giftCountEl.textContent=String(got); var el=giftCountEl.parentElement; el.style.transform='translateX(-50%) scale(1.08)'; setTimeout(function(){el.style.transform='translateX(-50%) scale(1)';},160); }
+    pulseHUD();
+
+    // ——— Рендер
+    function draw(){
+      ctx.imageSmoothingEnabled=true; ctx.clearRect(0,0,state.width,state.height);
+      var sky=ctx.createLinearGradient(0,0,0,state.height); sky.addColorStop(0,'#ffd0ec'); sky.addColorStop(1,'#cfeaff'); ctx.fillStyle=sky; ctx.fillRect(0,0,state.width,state.height);
+      var t=((window.performance&&performance.now)?performance.now():Date.now())/1000 - state.t0/1000;
+
+      // облака
+      for(var ci=0; ci<level.clouds.length; ci++){ var c=level.clouds[ci]; var px=(c.x+Math.sin(t*c.s)*40)%(state.width+800)-200; ctx.globalAlpha=.22; ctx.beginPath(); ctx.arc(px,c.y,c.r,0,Math.PI*2); ctx.arc(px+c.r*.8,c.y+10,c.r*.7,0,Math.PI*2); ctx.arc(px-c.r*.8,c.y+18,c.r*.6,0,Math.PI*2); ctx.fillStyle='#fff'; ctx.fill(); ctx.globalAlpha=1; }
+
+      ctx.save(); ctx.translate(Math.round(-state.camX),0);
+
+      // гирлянды
+      for(var gi2=0; gi2<level.garlands.length; gi2++){ var g=level.garlands[gi2]; ctx.strokeStyle='#ffd6e7'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(g.x-70,g.y); ctx.quadraticCurveTo(g.x,g.y+20,g.x+70,g.y); ctx.stroke(); for(var b=-2;b<=2;b++){ ctx.fillStyle=['#ff8fc7','#87d3ff','#ffcf99','#9ff3db','#cdb7ff'][(b+2)%5]; roundRect(ctx,g.x+b*28-8,g.y+4,16,10,4); ctx.fill(); } }
+
+      // платформы
+      for(var pi=0; pi<level.platforms.length; pi++){ var p=level.platforms[pi]; ctx.fillStyle=p.color||'#c8ffd0'; roundRect(ctx,Math.round(p.x)+.5,Math.round(p.y)+.5,Math.round(p.w),Math.round(p.h),12); ctx.fill(); ctx.strokeStyle='rgba(0,0,0,.12)'; ctx.stroke(); }
+      for(var mv=0; mv<level.movers.length; mv++){ var m2=level.movers[mv]; roundRect(ctx,Math.round(m2.x)+.5,Math.round(m2.y)+.5,Math.round(m2.w),Math.round(m2.h),10); ctx.fillStyle=m2.color||'#ffb3c6'; ctx.fill(); ctx.strokeStyle='rgba(0,0,0,.14)'; ctx.stroke(); }
+
+      // пружины
+      for(var si2=0; si2<level.springs.length; si2++){ var s=level.springs[si2]; roundRect(ctx,Math.round(s.x-8)+.5,Math.round(s.y-18)+.5,s.w+16,12,6); ctx.fillStyle='#fff'; ctx.fill(); ctx.strokeStyle='rgba(0,0,0,.12)'; ctx.stroke(); roundRect(ctx,Math.round(s.x)+.5,Math.round(s.y-12)+.5,s.w,12,6); ctx.fillStyle='#ff74b9'; ctx.fill(); }
+
+      // шипы
+      ctx.fillStyle='#ff4d6d'; ctx.strokeStyle='rgba(0,0,0,.12)'; for(var sp=0; sp<level.spikes.length; sp++){ var spk=level.spikes[sp]; ctx.beginPath(); ctx.moveTo(Math.round(spk.x)+.5,Math.round(spk.y)+.5); ctx.lineTo(Math.round(spk.x+12)+.5,Math.round(spk.y-18)+.5); ctx.lineTo(Math.round(spk.x+24)+.5,Math.round(spk.y)+.5); ctx.closePath(); ctx.fill(); ctx.stroke(); }
+
+      // чекпоинты
+      for(var cpi=0; cpi<level.checkpoints.length; cpi++){ var cp=level.checkpoints[cpi]; ctx.save(); ctx.translate(Math.round(cp.x)+.5,Math.round(cp.y)+.5); ctx.globalAlpha=cp.active?1:.85; ctx.fillStyle=cp.active?'#ffd166':'#74c0fc'; ctx.beginPath(); ctx.arc(0,0,cp.r,0,Math.PI*2); ctx.fill(); ctx.strokeStyle='rgba(0,0,0,.12)'; ctx.stroke(); ctx.fillStyle='#fff'; ctx.font='bold 12px sans-serif'; ctx.textAlign='center'; ctx.fillText('★',0,4); ctx.restore(); }
+
+      // подарки
+      ctx.font='28px Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji';
+      for(var gf=0; gf<level.gifts.length; gf++){ var gft=level.gifts[gf]; if(gft.got){ var a=(Math.sin(t*7+gft.x)*.5+.5)*.7+.2; ctx.globalAlpha=a; ctx.fillStyle='#ffd1f2'; ctx.beginPath(); ctx.arc(Math.round(gft.x)+.5,Math.round(gft.y)+.5,10,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1; } else { var bob=Math.sin(t*2+gft.x*.01)*4; ctx.save(); ctx.translate(Math.round(gft.x-16)+.5,Math.round(gft.y-16+bob)+.5); ctx.fillText('🎁',0,22); ctx.restore(); } }
+
+      // торт
+      drawCake(level.goalX, level.height-200);
+
+      // персонаж
+      drawPlayer();
+
+      // частицы
+      drawParticles();
+
+      ctx.restore();
+
+      if(state.ended){ drawFireworks(); drawConfetti(); }
+    }
+
+    function drawCake(x,y){ ctx.save(); ctx.fillStyle='#ffffff'; roundRect(ctx,x-36,y+44,72,14,7); ctx.fill(); ctx.fillStyle='#ffcf99'; roundRect(ctx,x-34,y+18,68,28,10); ctx.fill(); ctx.fillStyle='#ff9ed1'; roundRect(ctx,x-28,y,56,24,10); ctx.fill(); ctx.fillStyle='#9bd0ff'; roundRect(ctx,x-4,y-22,8,22,4); ctx.fill(); ctx.beginPath(); ctx.ellipse(x,y-28,6,10,0,0,Math.PI*2); ctx.fillStyle='#ffc857'; ctx.fill(); ctx.restore(); }
+
+    function drawPlayer(){
+      var px=Math.round(player.x)+.5, py=Math.round(player.y)+.5; ctx.save(); ctx.translate(px+player.w/2,py+player.h/2);
+      var squishX=Math.max(.78,1-Math.abs(player.vx)*.08), squishY=player.onGround?1.06:1; ctx.scale(squishX,squishY);
+      // донат-тело
+      ctx.fillStyle='#66c8ff'; ctx.beginPath(); ctx.ellipse(0,0,17,17,0,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#ffffff'; ctx.beginPath(); ctx.ellipse(0,0,8,8,0,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='rgba(0,0,0,.2)'; ctx.lineWidth=1; ctx.stroke();
+      // очки
+      ctx.fillStyle='#111'; roundRect(ctx,-9,-6,7,6,2); ctx.fill(); roundRect(ctx,2,-6,7,6,2); ctx.fill(); ctx.fillRect(-2,-3,4,2);
+      ctx.fillStyle='#fff'; ctx.fillRect(-7,-4,2,1.5); ctx.fillRect(4,-4,2,1.5);
+      // посыпка
+      for(var i=0;i<6;i++){ ctx.save(); ctx.rotate(i*.9); ctx.fillStyle=['#ff8fc7','#87d3ff','#ffcf99','#9ff3db','#cdb7ff'][i%5]; roundRect(ctx,-1,12,2,4,1); ctx.fill(); ctx.restore(); }
+      // ножки
+      ctx.strokeStyle='#333'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(-6,14); ctx.lineTo(-6,18+Math.sin(((window.performance&&performance.now)?performance.now():Date.now())/120)*1.5); ctx.moveTo(6,14); ctx.lineTo(6,18+Math.cos(((window.performance&&performance.now)?performance.now():Date.now())/120)*1.5); ctx.stroke();
+      ctx.restore();
+    }
+
+    // ——— Фейерверк/конфетти
+    var fireworks=[]; function spawnFirework(){ var x=state.camX+Math.random()*state.width; var y=80+Math.random()*180; var n=40; for(var i=0;i<n;i++){ var a=Math.random()*Math.PI*2, s=1.2+Math.random()*2.6; fireworks.push({x:x,y:y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:60+Math.random()*20}); } }
+    function updateFireworks(){ if(Math.random()<0.04) spawnFirework(); for(var i=0;i<fireworks.length;i++){ var p=fireworks[i]; p.x+=p.vx; p.y+=p.vy; p.vy+=0.02; p.life--; } for(var j=fireworks.length-1;j>=0;j--) if(fireworks[j].life<=0) fireworks.splice(j,1); }
+    function drawFireworks(){ ctx.save(); ctx.globalCompositeOperation='lighter'; for(var i=0;i<fireworks.length;i++){ var p=fireworks[i]; ctx.globalAlpha=Math.max(0,p.life/80); ctx.fillStyle='#ffd1f2'; ctx.fillRect(p.x,p.y,2,2); } ctx.globalAlpha=1; ctx.globalCompositeOperation='source-over'; ctx.restore(); }
+
+    var confetti=[]; function spawnWinBurst(){ for(var i=0;i<280;i++) confetti.push({ x: Math.random()*state.width, y: -Math.random()*200, vy: 1+Math.random()*2.5, vx: (Math.random()-.5)*1.5, size: 4+Math.random()*5, rot: Math.random()*Math.PI*2, vr: (Math.random()-.5)*0.2, col: ['#ff8fc7','#87d3ff','#ffcf99','#9ff3db','#cdb7ff'][Math.floor(Math.random()*5)] }); }
+    function updateConfetti(){ for(var i=0;i<confetti.length;i++){ var c=confetti[i]; c.y+=c.vy; c.x+=c.vx; c.rot+=c.vr; } for(var j=confetti.length-1;j>=0;j--) if(confetti[j].y>state.height+20) confetti.splice(j,1); }
+    function drawConfetti(){ for(var i=0;i<confetti.length;i++){ var c=confetti[i]; ctx.save(); ctx.translate(c.x,c.y); ctx.rotate(c.rot); ctx.fillStyle=c.col; ctx.fillRect(-c.size/2,-c.size/2,c.size,c.size); ctx.restore(); } }
+
+    var finalEl=document.getElementById('final');
+    var finalMsgEl=document.getElementById('finalMsg');
+    function endLevel(allGot){ if(state.ended) return; state.ended=true; if(finalMsgEl){ finalMsgEl.textContent = allGot ? 'Ты собрала все подарочки — пусть исполняются самые тёплые мечты ✨' : 'Ура! Ты добралась до тортика! 🎉'; } finalEl.style.opacity='1'; spawnWinBurst(); }
+
+    // ——— Частицы
+    function spawnDust(x,y,n,col){ for(var i=0;i<n;i++) state.particles.push({x:x,y:y,vx:(Math.random()-.5)*1.2,vy:-Math.random()*1.6,g:0.06,life:30+Math.random()*20,col:col}); }
+    function spawnSpark(x,y){ for(var i=0;i<12;i++){ var a=Math.random()*Math.PI*2,s=1+Math.random()*2; state.particles.push({x:x,y:y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,g:0.02,life:28+Math.random()*12,col:'#ffd166'}); } }
+    function updateParticles(){ for(var i=0;i<state.particles.length;i++){ var p=state.particles[i]; p.x+=p.vx; p.y+=p.vy; p.vy+=p.g; p.life--; } state.particles=state.particles.filter(function(p){return p.life>0;}); }
+    function drawParticles(){ for(var i=0;i<state.particles.length;i++){ var p=state.particles[i]; ctx.globalAlpha=Math.max(0,p.life/40); ctx.fillStyle=p.col; ctx.fillRect(p.x,p.y,2,2); ctx.globalAlpha=1; } }
+
+    // ——— Самопроверки (тесты)
+    (function selfChecks(){
+      try{
+        console.groupCollapsed('%cSelf-checks','color:#888');
+        console.assert(typeof update==='function' && typeof draw==='function', 'game loop ok');
+        console.assert(level.platforms.length>6, 'platforms exist');
+        console.assert(level.movers.length>=2, 'moving platforms exist');
+        console.assert(level.gifts.length===Number(document.getElementById('giftTotal').textContent), 'HUD gifts matches');
+        console.assert(rectsIntersect(0,0,10,10,{x:5,y:5,w:10,h:10})===true, 'AABB true');
+        console.assert(rectsIntersect(0,0,4,4,{x:10,y:10,w:2,h:2})===false, 'AABB false');
+        // unit: посадка сверху
+        var mockP={x:100,y:200,w:100,h:20}; var mockPl={x:120,y:150,w:32,h:38};
+        console.assert(canLandTop(180, +2, 170, mockP, mockPl)===true, 'canLandTop: should land');
+        console.assert(canLandTop(210, +2, 190, mockP, mockPl)===false, 'canLandTop: below surface -> no');
+        // unit: чекпоинт активируется
+        var cpTest={x:300,y:200,r:16,active:false};
+        var hitTest = rectsIntersect(290,190,20,20,{x:cpTest.x-cpTest.r,y:cpTest.y-cpTest.r,w:cpTest.r*2,h:cpTest.r*2});
+        console.assert(hitTest===true,'checkpoint hit AABB works');
+        // unit: перенос по муверу — без рывков
+        (function(){
+          var m={x:100,y:100,w:100,h:20,vx:2}; var pl={x:110,y:70,w:20,h:30}; var prevBottom=pl.y+pl.h; var vy=2; var ny=pl.y+vy; var can=canLandTop(prevBottom,vy,ny,{x:m.x,y:m.y,w:m.w,h:m.h},pl); console.assert(can===true,'stand test: landable');
+        })();
+        console.groupEnd();
+      }catch(e){ console.warn('Self-checks failed:', e); }
+    })();
+
+    function loop(){ update(); draw(); requestAnimationFrame(loop); }
+    loop();
+  })();
+  </script>
+</body>
+</html>
